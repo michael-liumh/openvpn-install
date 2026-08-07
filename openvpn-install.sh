@@ -2037,6 +2037,9 @@ function checkOS() {
 		if [[ $ID == "arch" ]]; then
 			OS="arch"
 		fi
+    if [[ $ID == "kylin" || $ID_LIKE == "kylin" ]]; then
+			OS="kylin"
+		fi
 	elif [[ -e /etc/arch-release ]]; then
 		OS=arch
 	else
@@ -3062,7 +3065,7 @@ function installOpenVPN() {
 			run_cmd_fatal "Installing OpenVPN" apt-get install -y openvpn iptables openssl curl ca-certificates tar dnsutils socat
 		elif [[ $OS == 'centos' ]]; then
 			run_cmd_fatal "Installing OpenVPN" yum install -y openvpn iptables openssl ca-certificates curl tar bind-utils socat 'policycoreutils-python*'
-		elif [[ $OS == 'oracle' ]]; then
+		elif [[ $OS =~ (oracle|kylin) ]]; then
 			run_cmd_fatal "Installing OpenVPN" yum install -y openvpn iptables openssl ca-certificates curl tar bind-utils socat policycoreutils-python-utils
 		elif [[ $OS == 'amzn2023' ]]; then
 			run_cmd_fatal "Installing OpenVPN" dnf install -y openvpn iptables openssl ca-certificates curl tar bind-utils socat
@@ -3093,7 +3096,7 @@ function installOpenVPN() {
 				log_info "Data Channel Offload (DCO) is available but not enabled (requires UDP, AEAD cipher)"
 			fi
 		else
-			log_info "Data Channel Offload (DCO) is not available (requires OpenVPN 2.6+ and kernel support)"
+			log_warn "Data Channel Offload (DCO) is not available (requires OpenVPN 2.6+ and kernel support)"
 		fi
 
 		# Create the server directory (OpenVPN 2.4+ directory structure)
@@ -3127,14 +3130,20 @@ function installOpenVPN() {
 			OPENVPN_GROUP=nobody
 		fi
 	fi
+  
+  local openvpn_ver
+  openvpn_ver=$(get_openvpn_version)
 
 	# Install the latest version of easy-rsa from source, if not already installed.
 	if [[ ! -d /etc/openvpn/server/easy-rsa/ ]]; then
 		local easy_rsa_archive
 		easy_rsa_archive=$(mktemp /tmp/easy-rsa.XXXXXX.tgz) || log_fatal "Failed to create temporary Easy-RSA archive"
 
-		run_cmd_fatal "Downloading Easy-RSA v${EASYRSA_VERSION}" curl -fL --retry 5 -o "$easy_rsa_archive" "https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
-		log_info "Verifying Easy-RSA checksum..."
+		if [ ! -f EasyRSA-${EASYRSA_VERSION}.tgz ]; then
+      run_cmd_fatal "Downloading Easy-RSA v${EASYRSA_VERSION}" curl -fL --retry 5 "https://github.com/OpenVPN/easy-rsa/releases/download/v${EASYRSA_VERSION}/EasyRSA-${EASYRSA_VERSION}.tgz"
+		fi
+    run_cmd_fatal "Copying Easy-RSA v${EASYRSA_VERSION} to $easy_rsa_archive" cp -p EasyRSA-${EASYRSA_VERSION}.tgz $easy_rsa_archive
+    log_info "Verifying Easy-RSA checksum..."
 		CHECKSUM_OUTPUT=$(echo "${EASYRSA_SHA256}  $easy_rsa_archive" | sha256sum -c 2>&1) || {
 			_log_to_file "[CHECKSUM] $CHECKSUM_OUTPUT"
 			run_cmd "Cleaning up failed download" rm -f "$easy_rsa_archive"
@@ -3203,12 +3212,20 @@ function installOpenVPN() {
 			;;
 		crypt)
 			# Generate tls-crypt key
-			run_cmd_fatal "Generating tls-crypt key" openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
+			if version_ge "$openvpn_ver" "2.5.0"; then
+        run_cmd_fatal "Generating tls-crypt key" openvpn --genkey secret /etc/openvpn/server/tls-crypt.key
+      else
+        run_cmd_fatal "Generating tls-crypt key" openvpn --genkey --secret /etc/openvpn/server/tls-crypt.key
+      fi
 			;;
 		auth)
 			# Generate tls-auth key
-			run_cmd_fatal "Generating tls-auth key" openvpn --genkey secret /etc/openvpn/server/tls-auth.key
-			;;
+      if version_ge "$openvpn_ver" "2.5.0"; then
+        run_cmd_fatal "Generating tls-auth key" openvpn --genkey secret /etc/openvpn/server/tls-auth.key
+      else
+        run_cmd_fatal "Generating tls-auth key" openvpn --genkey --secret /etc/openvpn/server/tls-auth.key
+			fi
+      ;;
 		esac
 		# Store auth mode for later use
 		echo "$AUTH_MODE" >AUTH_MODE_GENERATED
@@ -3454,8 +3471,10 @@ topology subnet" >>/etc/openvpn/server/server.conf
 
 	# Use ECDH key exchange (dh none) with tls-groups for curve negotiation
 	echo "dh none" >>/etc/openvpn/server/server.conf
-	echo "tls-groups $TLS_GROUPS" >>/etc/openvpn/server/server.conf
-
+  if version_ge "$openvpn_ver" "2.5.0"; then
+    echo "tls-groups $TLS_GROUPS" >>/etc/openvpn/server/server.conf
+  fi
+  
 	case $TLS_SIG in
 	crypt-v2)
 		echo "tls-crypt-v2 tls-crypt-v2.key" >>/etc/openvpn/server/server.conf
